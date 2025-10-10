@@ -1,12 +1,9 @@
-import gleam
 import gleam/erlang/process.{type Subject}
 import gleam/otp/actor
-import gleam/otp/static_supervisor as sup
 import gleam/otp/supervision
 import gleeunit
 import glydamic/child
-
-// import gleam/otp/system
+import glydamic/supervisor as sup
 
 pub fn main() -> Nil {
   gleeunit.main()
@@ -14,55 +11,56 @@ pub fn main() -> Nil {
 
 // gleeunit test functions end in `_test`
 pub fn temporary_child_test() {
-  let #(supervisor_pid, supervisor_name) = start_supervisor()
+  let assert Ok(actor.Started(_, supervisor)) =
+    sup.new(sup.OneForOne) |> sup.start
+
+  let sub_sup_name = process.new_name("child_sup")
+  let child_spec =
+    supervision.supervisor(fn() { start_supervisor(sub_sup_name) })
+  let assert Ok(child) = child.start(supervisor, child_spec)
+  let sub_sup = child.started_data(child)
   let reply_subject = simple_subject()
   let child_spec =
-    supervision.worker(fn() {
-      gleam.Ok(actor.Started(start_link(reply_subject), Nil))
-    })
+    supervision.worker(fn() { start_link(reply_subject) })
     |> supervision.restart(supervision.Temporary)
 
-  let assert Ok(child.SupervisedChild(_pid, id)) =
-    child.start(supervisor_pid, child_spec)
+  let assert Ok(child) = child.start(sub_sup, child_spec)
   let assert Ok(CReq(handler_subject, "Give me authentication string.")) =
     process.receive(reply_subject, 200)
   process.send(handler_subject, CResp("mysecretpw"))
   let assert Ok(CReq(_handler_subject, "You authenticated correct!")) =
     process.receive(reply_subject, 100)
   // Terminate shall fail since the child has terminated when correct auth is given
-  let assert Error(child.NotExist) =
-    child.terminate(get_sup_pid(supervisor_name), id)
-  let assert Error(child.NotFound) = child.delete(supervisor_pid, id)
+  let assert Error(child.NotExist) = child.terminate(supervisor, child)
+  let assert Error(child.NotFound) = child.delete(supervisor, child)
 }
 
 pub fn transient_child_test() {
-  let #(supervisor_pid, _supervisor_name) = start_supervisor()
+  let sup_name = process.new_name("one_for_all_sup")
+  let assert Ok(actor.Started(_, supervisor)) = start_supervisor(sup_name)
   let reply_subject = simple_subject()
   let child_spec =
-    supervision.worker(fn() {
-      gleam.Ok(actor.Started(start_link(reply_subject), Nil))
-    })
+    supervision.worker(fn() { start_link(reply_subject) })
     |> supervision.restart(supervision.Transient)
 
-  let assert Ok(child.SupervisedChild(_pid, id)) =
-    child.start(supervisor_pid, child_spec)
+  let assert Ok(child) = child.start(supervisor, child_spec)
   let assert Ok(CReq(handler_subject, "Give me authentication string.")) =
     process.receive(reply_subject, 200)
   process.send(handler_subject, CResp("die"))
 
   let assert Ok(CReq(handler_subject, "Give me authentication string.")) =
     process.receive(reply_subject, 200)
-  assert Error(child.Running) == child.restart(supervisor_pid, id)
+  assert Error(child.Running) == child.restart(supervisor, child)
   process.send(handler_subject, CResp("mysecretpw"))
   let assert Ok(CReq(_handler_subject, "You authenticated correct!")) =
     process.receive(reply_subject, 100)
   process.sleep(200)
 
-  let assert Ok(_pid) = child.restart(supervisor_pid, id)
+  let assert Ok(_pid) = child.restart(supervisor, child)
   // echo system.get_state(pid)
   let assert Ok(CReq(handler_subject, "Give me authentication string.")) =
     process.receive(reply_subject, 200)
-  let assert Error(child.Running) = child.delete(supervisor_pid, id)
+  let assert Error(child.Running) = child.delete(supervisor, child)
   process.send(handler_subject, CResp("mysecretpw"))
   let assert Ok(CReq(_handler_subject, "You authenticated correct!")) =
     process.receive(reply_subject, 100)
@@ -70,24 +68,22 @@ pub fn transient_child_test() {
   // Shall Terminate fail for transient since the child has terminated when correct auth is given?
   // let assert Ok(Nil) = child.terminate(get_sup_pid(supervisor_name), id)
   process.sleep(200)
-  let assert Ok(Nil) = child.delete(supervisor_pid, id)
+  let assert Ok(Nil) = child.delete(supervisor, child)
 }
 
 pub fn permanent_child_test() {
-  let #(supervisor_pid, supervisor_name) = start_supervisor()
+  let sup_name = process.new_name("one_for_all_sup")
+  let assert Ok(actor.Started(_, supervisor)) = start_supervisor(sup_name)
   let reply_subject = simple_subject()
   let child_spec =
-    supervision.worker(fn() {
-      gleam.Ok(actor.Started(start_link(reply_subject), Nil))
-    })
+    supervision.worker(fn() { start_link(reply_subject) })
     |> supervision.restart(supervision.Permanent)
 
-  let assert Ok(child.SupervisedChild(_pid, id)) =
-    child.start(supervisor_pid, child_spec)
+  let assert Ok(child) = child.start(supervisor, child_spec)
 
   let assert Ok(CReq(handler_subject, "Give me authentication string.")) =
     process.receive(reply_subject, 200)
-  assert Error(child.Running) == child.restart(supervisor_pid, id)
+  assert Error(child.Running) == child.restart(supervisor, child)
   process.send(handler_subject, CResp("mysecretpw"))
   let assert Ok(CReq(_handler_subject, "You authenticated correct!")) =
     process.receive(reply_subject, 100)
@@ -97,22 +93,16 @@ pub fn permanent_child_test() {
   process.send(handler_subject, CResp("mysecretpw"))
   let assert Ok(CReq(_handler_subject, "You authenticated correct!")) =
     process.receive(reply_subject, 100)
-  let assert Ok(Nil) = child.terminate(get_sup_pid(supervisor_name), id)
+  let assert Ok(Nil) = child.terminate(supervisor, child)
   process.sleep(200)
-  let assert Ok(Nil) = child.delete(supervisor_pid, id)
+  let assert Ok(Nil) = child.delete(supervisor, child)
 }
 
 // ----------------- Internal functions -------------
-fn start_supervisor() -> #(process.Pid, process.Name(String)) {
-  let sup_name = process.new_name("one_for_all_sup")
-  let assert Ok(pid) = case { sup.new(sup.OneForAll) |> sup.start } {
-    Ok(actor.Started(pid, _data)) -> {
-      let assert Ok(Nil) = process.register(pid, sup_name)
-      Ok(pid)
-    }
-    Error(reason) -> Error(reason)
-  }
-  #(pid, sup_name)
+fn start_supervisor(
+  name: process.Name(Nil),
+) -> actor.StartResult(sup.Supervisor) {
+  sup.new(sup.OneForOne) |> sup.named(name) |> sup.start
 }
 
 // -----------------------------------
@@ -138,19 +128,14 @@ fn simple_subject() -> Subject(ClientRequest(String)) {
   process.new_subject()
 }
 
-fn get_sup_pid(name: process.Name(a)) -> process.Pid {
-  let assert Ok(pid) = process.named(name)
-  pid
-}
-
-fn start_link(client_subject: Subject(ClientRequest(String))) -> process.Pid {
-  let assert Ok(actor.Started(pid, _subject1)) =
-    actor.new_with_initialiser(100, fn(mysubject) {
-      init(mysubject, client_subject)
-    })
-    |> actor.on_message(loop)
-    |> actor.start()
-  pid
+fn start_link(
+  client_subject: Subject(ClientRequest(String)),
+) -> actor.StartResult(Subject(ClientResponse(String))) {
+  actor.new_with_initialiser(100, fn(mysubject) {
+    init(mysubject, client_subject)
+  })
+  |> actor.on_message(loop)
+  |> actor.start()
 }
 
 fn init(
@@ -164,7 +149,6 @@ fn init(
   ),
   String,
 ) {
-  let _ = child.set_label("glydamic_child")
   let selector =
     process.new_selector()
     |> process.select(mysubject)

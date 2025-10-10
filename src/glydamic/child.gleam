@@ -1,20 +1,27 @@
 //// Module for starting "dynamic" children.
-////
-//// The child module is supervisor agnostic, it does not care if
-//// if the supervisor is "static" or anything else as long as it
-//// is an Erlang OTP supervisor except simple_one_for_one strategy.
 
-import gleam/erlang/atom.{type Atom}
+import gleam
 import gleam/erlang/process.{type Pid}
 import gleam/otp/actor
 import gleam/otp/supervision.{type ChildSpecification}
+import glydamic/supervisor.{type Supervisor}
 
-/// `pid` is the Pid of the started child.
-///
 /// `id` is the supervisor internal id for the child.
-pub type Child {
-  SupervisedChild(pid: Pid, id: Int)
+///
+/// `started` is the value returned to the parent when
+/// their child successfully starts.
+pub type Child(a) {
+  SupervisedChild(id: ChildId, started: actor.Started(a))
 }
+
+/// Get the data part from the child process/actor start result.
+/// Normally this will be a Subject to use when sending
+/// messages to the child.
+pub fn started_data(child: Child(a)) {
+  child.started.data
+}
+
+pub type ChildId
 
 pub type StartError {
   NoSupervisor
@@ -23,13 +30,11 @@ pub type StartError {
   Actor(actor.StartError)
 }
 
-pub type TerminateError {
-  NotExist
-}
-
 pub type DeleteError {
+  LostSupervisor
   Running
   Restarting
+  NotExist
   NotFound
   SimpleOneForOne
   Unknown
@@ -37,37 +42,64 @@ pub type DeleteError {
 
 /// Starts the child with the corresponding child specification.
 ///
-/// `sup_pid` is the Pid of the supervisor.
-///
 /// Returns the child Pid and its internal id used by the supervisor
 /// for the other functions.
-@external(erlang, "glydamic_child_ffi", "start_child")
 pub fn start(
-  sup_pid: Pid,
+  supervisor: Supervisor,
   child_spec: ChildSpecification(a),
-) -> Result(Child, StartError)
-
-/// Tells supervisor sup_pid to delete the child specification identified by Id.
-/// The corresponding child process must not be running.
-/// Use `terminate` to terminate it.
-@external(erlang, "glydamic_child_ffi", "delete_child")
-pub fn delete(sup_pid: Pid, id: Int) -> Result(Nil, DeleteError)
-
-@external(erlang, "glydamic_child_ffi", "restart_child")
-pub fn restart(sup_pid: Pid, id: Int) -> Result(Pid, DeleteError)
-
-@external(erlang, "glydamic_child_ffi", "terminate_child")
-pub fn terminate(sup_pid: Pid, id: Int) -> Result(Nil, TerminateError)
-
-/// Sets the so called process label for unregistered processes
-/// to aid in debugging.
-/// See [proc_lib:set_label/1](https://www.erlang.org/docs/28/apps/stdlib/proc_lib.html#set_label/1)
-pub fn set_label(label: String) -> Nil {
-  erlang_set_label(atom.create(label))
-  Nil
+) -> Result(Child(a), StartError) {
+  case supervisor.pid(supervisor) {
+    gleam.Ok(pid) -> erl_start(pid, child_spec)
+    gleam.Error(Nil) -> gleam.Error(NoSupervisor)
+  }
 }
 
-type SetLabelResult
+@external(erlang, "glydamic_child_ffi", "start_child")
+fn erl_start(
+  sup_pid: Pid,
+  child_spec: ChildSpecification(a),
+) -> Result(Child(a), StartError)
 
-@external(erlang, "proc_lib", "set_label")
-fn erlang_set_label(l: Atom) -> SetLabelResult
+/// Tells supervisor to delete the child specification identified by Id.
+/// The corresponding child process must not be running.
+/// Use `terminate` to terminate it.
+pub fn delete(
+  supervisor: Supervisor,
+  child: Child(a),
+) -> Result(Nil, DeleteError) {
+  case supervisor.pid(supervisor) {
+    gleam.Ok(pid) -> erl_delete(pid, child.id)
+    gleam.Error(Nil) -> gleam.Error(LostSupervisor)
+  }
+}
+
+@external(erlang, "glydamic_child_ffi", "delete_child")
+fn erl_delete(sup_pid: Pid, id: ChildId) -> Result(Nil, DeleteError)
+
+/// Restart the child
+pub fn restart(
+  supervisor: Supervisor,
+  child: Child(a),
+) -> Result(Child(a), DeleteError) {
+  case supervisor.pid(supervisor) {
+    gleam.Ok(pid) -> erl_restart(pid, child.id)
+    gleam.Error(Nil) -> gleam.Error(LostSupervisor)
+  }
+}
+
+@external(erlang, "glydamic_child_ffi", "restart_child")
+fn erl_restart(sup_pid: Pid, id: ChildId) -> Result(Child(a), DeleteError)
+
+/// Stop the child
+pub fn terminate(
+  supervisor: Supervisor,
+  child: Child(a),
+) -> Result(Nil, DeleteError) {
+  case supervisor.pid(supervisor) {
+    gleam.Ok(pid) -> erl_terminate(pid, child.id)
+    gleam.Error(Nil) -> gleam.Error(LostSupervisor)
+  }
+}
+
+@external(erlang, "glydamic_child_ffi", "terminate_child")
+fn erl_terminate(sup_pid: Pid, id: ChildId) -> Result(Nil, DeleteError)
