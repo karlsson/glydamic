@@ -88,6 +88,13 @@ pub fn pid(s: Supervisor) -> Result(Pid, Nil) {
   process.subject_owner(subject)
 }
 
+/// Similar to named subject but returns a named
+/// Supervisor to be used when creating children.
+pub fn named_supervisor(name: process.Name(Nil)) {
+  let named_subject = process.named_subject(name)
+  Supervisor(named_subject)
+}
+
 /// Start a `one_for_one` or `one_for_all` supervisor.
 pub fn start(builder: Builder) -> actor.StartResult(Supervisor) {
   let module = atom.create("glydamic@supervisor")
